@@ -368,7 +368,7 @@ class TaskConfigDialog(QDialog):
     DIALOG_STYLE_SHEET = """
         /* ===== 对话框基础样式 ===== */
         QDialog {
-            background-color: #f8f9fa;
+            background-color: #f1f3f5;
         }
         
         /* ===== 组框样式 ===== */
@@ -443,7 +443,7 @@ class TaskConfigDialog(QDialog):
         
         QScrollBar:vertical {
             width: 12px;
-            background-color: #f8f9fa;
+            background-color: #e9ecef;
         }
         
         QScrollBar::handle:vertical {
@@ -1292,11 +1292,20 @@ class CopyThread(QThread):
             "copied_count": 0,
             "failed_count": 0,
             "total_files": 0,
+            "total_size": 0,  # 总文件大小（字节）
+            "copied_size": 0,  # 已复制大小（字节）
             "current_file": "",
+            "current_file_size": 0,  # 当前文件大小
+            "current_file_copied": 0,  # 当前文件已复制大小
             "progress": 0.0,
             "start_time": None,
-            "end_time": None
+            "end_time": None,
+            "speed": 0  # 当前速度（字节/秒）
         }
+        
+        # 速度跟踪
+        self.last_update_time = None
+        self.last_copied_size = 0
         
         # 已处理的文件列表
         self.processed_files = set()
@@ -1328,6 +1337,29 @@ class CopyThread(QThread):
         except Exception as e:
             self.progress.emit(f"✗ 加载任务进度失败：{str(e)}")
     
+    def format_size(self, size_bytes):
+        """格式化文件大小显示
+        
+        Args:
+            size_bytes: 文件大小（字节）
+            
+        Returns:
+            str: 格式化后的文件大小字符串
+        """
+        if size_bytes == 0:
+            return "0 B"
+        
+        size_names = ["B", "KB", "MB", "GB", "TB"]
+        i = 0
+        while size_bytes >= 1024 and i < len(size_names) - 1:
+            size_bytes /= 1024.0
+            i += 1
+        
+        if i == 0:
+            return f"{int(size_bytes)} {size_names[i]}"
+        else:
+            return f"{size_bytes:.1f} {size_names[i]}"
+    
     def save_progress(self):
         """保存任务进度"""
         try:
@@ -1357,8 +1389,9 @@ class CopyThread(QThread):
             self.task_status["start_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.save_progress()
             
-            # 查找匹配的文件
+            # 查找匹配的文件并计算总大小
             matched_files = []
+            total_size = 0
             for root, dirs, files in os.walk(self.source_folder):
                 for file in files:
                     file_path = os.path.join(root, file)
@@ -1386,10 +1419,27 @@ class CopyThread(QThread):
                     
                     if match_filename and match_suffix:
                         matched_files.append(file_path)
+                        # 计算文件大小
+                        try:
+                            file_size = os.path.getsize(file_path)
+                            total_size += file_size
+                        except:
+                            # 如果无法获取文件大小，跳过
+                            pass
             
-            # 更新总文件数
+            # 更新总文件数和总大小
             self.task_status["total_files"] = len(matched_files)
+            self.task_status["total_size"] = total_size
             self.save_progress()
+            
+            # 发送总大小信息
+            if total_size > 0:
+                size_str = self.format_size(total_size)
+                self.progress.emit(f"总文件大小：{size_str}")
+            
+            # 初始化速度跟踪
+            self.last_update_time = datetime.now()
+            self.last_copied_size = 0
             
             # 根据复制方式执行不同的复制逻辑
             for i, file_path in enumerate(matched_files):
@@ -1453,17 +1503,69 @@ class CopyThread(QThread):
                         if not os.path.exists(dest_dir):
                             os.makedirs(dest_dir)
                     
+                    # 获取当前文件大小
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        self.task_status["current_file_size"] = file_size
+                        self.task_status["current_file_copied"] = 0
+                    except:
+                        file_size = 0
+                        self.task_status["current_file_size"] = 0
+                        self.task_status["current_file_copied"] = 0
+                    
                     # 发送正在复制消息，更新图标
-                    self.progress.emit(f"正在复制：{file_path}")
+                    size_str = self.format_size(file_size) if file_size > 0 else "未知大小"
+                    self.progress.emit(f"正在复制：{file_path} ({size_str})")
                     
-                    # 复制文件
-                    with open(file_path, "rb") as src, open(dest_file_path, "wb") as dst:
-                        dst.write(src.read())
-                    
+                    # 复制文件（分块复制以便跟踪进度和速度）
                     copied_count += 1
+                    with open(file_path, "rb") as src, open(dest_file_path, "wb") as dst:
+                        # 分块复制，每块64KB
+                        chunk_size = 64 * 1024  # 64KB
+                        while True:
+                            chunk = src.read(chunk_size)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                            
+                            # 更新已复制大小
+                            self.task_status["current_file_copied"] += len(chunk)
+                            self.task_status["copied_size"] += len(chunk)
+                            
+                            # 计算当前文件进度
+                            if file_size > 0:
+                                file_progress = (self.task_status["current_file_copied"] / file_size) * 100
+                                
+                                # 计算总体进度（基于文件大小）
+                                if self.task_status["total_size"] > 0:
+                                    total_progress = (self.task_status["copied_size"] / self.task_status["total_size"]) * 100
+                                    self.task_status["progress"] = total_progress
+                                    
+                                    # 发送进度消息
+                                    self.progress.emit(f"进度：{total_progress:.1f}%")
+                            
+                            # 计算速度
+                            current_time = datetime.now()
+                            if self.last_update_time:
+                                time_diff = (current_time - self.last_update_time).total_seconds()
+                                if time_diff >= 1:  # 每秒更新一次速度
+                                    size_diff = self.task_status["copied_size"] - self.last_copied_size
+                                    speed = size_diff / time_diff  # 字节/秒
+                                    self.task_status["speed"] = speed
+                                    
+                                    # 更新跟踪变量
+                                    self.last_update_time = current_time
+                                    self.last_copied_size = self.task_status["copied_size"]
+                                    
+                                    # 发送速度消息
+                                    speed_str = self.format_size(speed) + "/s"
+                                    self.progress.emit(f"速度：{speed_str}")
+                            else:
+                                self.last_update_time = current_time
+                                self.last_copied_size = self.task_status["copied_size"]
+                    
                     self.processed_files.add(file_path)
                     self.task_status["copied_count"] = copied_count
-                    self.task_status["progress"] = (i + 1) / len(matched_files) * 100
                     self.save_progress()
                     
                     self.progress.emit(f"✓ 复制成功：{file_path} -> {dest_file_path}")
@@ -1641,7 +1743,7 @@ class FileOrganizerApp(QMainWindow):
         self.setStyleSheet("""
             /* ===== 基础样式 ===== */
             QMainWindow {
-                background-color: #f8f9fa;
+                background-color: #f1f3f5;
             }
             
             /* ===== 组框样式 ===== */
@@ -1847,7 +1949,6 @@ class FileOrganizerApp(QMainWindow):
             
             /* ===== 表格样式 ===== */
             QTableWidget {
-                gridline-color: #e9ecef;
                 background-color: #ffffff;
                 font-size: 13px;
             }
@@ -1924,22 +2025,16 @@ class FileOrganizerApp(QMainWindow):
         self.tab_widget.setTabShape(QTabWidget.TabShape.Rounded)
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.setMovable(True)
+        # 默认不显示关闭按钮，将在添加标签页时单独设置
+        self.tab_widget.setTabsClosable(False)
         main_layout.addWidget(self.tab_widget)
-        
-        # 创建任务详情标签页控件
-        self.task_detail_tabs = QTabWidget()
-        self.task_detail_tabs.setTabShape(QTabWidget.TabShape.Rounded)
-        self.task_detail_tabs.setDocumentMode(True)
-        self.task_detail_tabs.setMovable(True)
-        self.task_detail_tabs.setTabsClosable(True)
-        self.task_detail_tabs.tabCloseRequested.connect(self.close_task_detail_tab)
-        main_layout.addWidget(self.task_detail_tabs)
         
         # 存储任务详情标签页的引用
         self.task_detail_tabs_dict = {}
         
         # 创建各个功能标签页
         self.create_file_organize_tab()
+        self.create_task_detail_main_tab()  # 在文件整理和定时任务之间添加任务详情标签
         self.create_scheduler_tab()
         self.create_logs_tab()
     
@@ -2033,6 +2128,7 @@ class FileOrganizerApp(QMainWindow):
         
         # 将标签页添加到主标签控件
         self.tab_widget.addTab(tab, "文件整理")
+        # 文件整理标签页不需要关闭按钮
         
         # 初始化任务列表显示
         self.update_task_list_display()
@@ -2130,6 +2226,29 @@ class FileOrganizerApp(QMainWindow):
         
         # 将定时任务标签页添加到主标签控件
         self.tab_widget.addTab(tab, "定时任务")
+        # 定时任务标签页不需要关闭按钮
+    
+    def create_task_detail_main_tab(self):
+        """创建任务详情主标签页（在文件整理和定时任务之间）"""
+        # 创建一个包含标签页控件的容器，支持多个任务详情
+        self.task_detail_container = QWidget()
+        layout = QVBoxLayout(self.task_detail_container)
+        layout.setSpacing(12)
+        layout.setContentsMargins(8, 8, 8, 8)
+        
+        # 创建任务详情标签页控件
+        self.task_detail_tabs = QTabWidget()
+        self.task_detail_tabs.setTabsClosable(True)
+        self.task_detail_tabs.tabCloseRequested.connect(self.close_task_detail_tab)
+        layout.addWidget(self.task_detail_tabs)
+        
+
+        
+        # 将任务详情标签页添加到主标签控件
+        self.tab_widget.addTab(self.task_detail_container, "任务详情")
+        # 任务详情标签页不需要关闭按钮
+    
+
     
     def create_logs_tab(self):
         """创建日志标签页"""
@@ -2175,6 +2294,9 @@ class FileOrganizerApp(QMainWindow):
         refresh_log_btn = QPushButton("刷新日志")
         refresh_log_btn.clicked.connect(self.refresh_logs)
         
+        view_older_btn = QPushButton("向后查看")
+        view_older_btn.clicked.connect(self.view_older_logs)
+        
         export_log_btn = QPushButton("导出日志")
         export_log_btn.clicked.connect(self.export_logs)
         
@@ -2182,11 +2304,13 @@ class FileOrganizerApp(QMainWindow):
         clear_log_btn.clicked.connect(self.clear_logs)
         
         log_action_layout.addWidget(refresh_log_btn)
+        log_action_layout.addWidget(view_older_btn)
         log_action_layout.addWidget(export_log_btn)
         log_action_layout.addWidget(clear_log_btn)        
         layout.addLayout(log_action_layout)
         
         self.tab_widget.addTab(tab, "日志")
+        # 日志标签页不需要关闭按钮
         
         # 初始刷新日志
         self.refresh_logs()
@@ -2282,8 +2406,12 @@ class FileOrganizerApp(QMainWindow):
         }
         self.scheduled_task_history.append(history_record)
         
-        # 执行文件复制任务
-        self.run_task(file_task)
+        # 执行文件复制任务（静默执行，不显示确认对话框）
+        self.is_scheduled_task = True  # 设置定时任务标志
+        try:
+            self.run_task(file_task)
+        finally:
+            self.is_scheduled_task = False  # 清除标志
         
         # 更新执行历史记录
         for record in self.scheduled_task_history:
@@ -2431,15 +2559,8 @@ class FileOrganizerApp(QMainWindow):
             QMessageBox.warning(self, "警告", "关联的文件复制任务不存在")
             return
         
-        # 检查是否已经打开了该任务的详情标签页
-        task_tab_index = self.find_task_detail_tab(linked_task_id)
-        if task_tab_index >= 0:
-            # 如果已经打开，切换到该标签页
-            self.task_detail_tabs.setCurrentIndex(task_tab_index)
-            return
-        
-        # 创建任务详情标签页
-        self.create_task_detail_tab(file_task)
+        # 在主任务详情标签页中显示任务详情
+        self.show_task_detail_in_main_tab(file_task)
     
     def edit_scheduled_task(self):
         """编辑选中的定时任务"""
@@ -3014,39 +3135,68 @@ class FileOrganizerApp(QMainWindow):
             
             # 验证文件夹存在性
             if not os.path.exists(source_folder):
-                QMessageBox.warning(self, "警告", f"源文件夹不存在：{source_folder}")
-                return
+                # 对于定时任务，静默记录错误而不显示对话框
+                if hasattr(self, 'is_scheduled_task') and self.is_scheduled_task:
+                    error_msg = f"源文件夹不存在：{source_folder}"
+                    self.log_message(f"定时任务执行失败：{error_msg}")
+                    return
+                else:
+                    QMessageBox.warning(self, "警告", f"源文件夹不存在：{source_folder}")
+                    return
             
             if not os.path.exists(dest_folder):
-                reply = QMessageBox.question(self, "确认", "目标文件夹不存在，是否创建？",
-                                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                if reply == QMessageBox.StandardButton.Yes:
+                # 对于定时任务，自动创建目标文件夹而不询问
+                if hasattr(self, 'is_scheduled_task') and self.is_scheduled_task:
                     try:
                         os.makedirs(dest_folder)
+                        self.log_message(f"自动创建目标文件夹：{dest_folder}")
                     except Exception as e:
-                        QMessageBox.critical(self, "错误", f"创建目标文件夹失败：{str(e)}")
+                        error_msg = f"创建目标文件夹失败：{str(e)}"
+                        self.log_message(f"定时任务执行失败：{error_msg}")
                         return
                 else:
-                    return
+                    reply = QMessageBox.question(self, "确认", "目标文件夹不存在，是否创建？",
+                                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if reply == QMessageBox.StandardButton.Yes:
+                        try:
+                            os.makedirs(dest_folder)
+                        except Exception as e:
+                            QMessageBox.critical(self, "错误", f"创建目标文件夹失败：{str(e)}")
+                            return
+                    else:
+                        return
             
             # 检查权限
             if not os.access(source_folder, os.R_OK):
-                QMessageBox.warning(self, "警告", f"没有读取源文件夹的权限：{source_folder}")
-                return
+                # 对于定时任务，静默记录错误而不显示对话框
+                if hasattr(self, 'is_scheduled_task') and self.is_scheduled_task:
+                    error_msg = f"没有读取源文件夹的权限：{source_folder}"
+                    self.log_message(f"定时任务执行失败：{error_msg}")
+                    return
+                else:
+                    QMessageBox.warning(self, "警告", f"没有读取源文件夹的权限：{source_folder}")
+                    return
             
             if not os.access(dest_folder, os.W_OK):
-                QMessageBox.warning(self, "警告", f"没有写入目标文件夹的权限：{dest_folder}")
-                return
+                # 对于定时任务，静默记录错误而不显示对话框
+                if hasattr(self, 'is_scheduled_task') and self.is_scheduled_task:
+                    error_msg = f"没有写入目标文件夹的权限：{dest_folder}"
+                    self.log_message(f"定时任务执行失败：{error_msg}")
+                    return
+                else:
+                    QMessageBox.warning(self, "警告", f"没有写入目标文件夹的权限：{dest_folder}")
+                    return
             
-            # 确认执行
-            reply = QMessageBox.question(self, "确认执行", 
-                                       f"确定要执行任务 '{task.get('description', '未命名任务')}' 吗？\n"
-                                       f"源文件夹：{source_folder}\n"
-                                       f"目标文件夹：{dest_folder}\n"
-                                       f"复制方式：{copy_mode}",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+            # 确认执行（定时任务静默执行，不显示确认对话框）
+            if not (hasattr(self, 'is_scheduled_task') and self.is_scheduled_task):
+                reply = QMessageBox.question(self, "确认执行", 
+                                           f"确定要执行任务 '{task.get('description', '未命名任务')}' 吗？\n"
+                                           f"源文件夹：{source_folder}\n"
+                                           f"目标文件夹：{dest_folder}\n"
+                                           f"复制方式：{copy_mode}",
+                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
             
             # 停止当前正在执行的任务（如果有）
             if self.current_thread and self.current_thread.isRunning():
@@ -3055,11 +3205,7 @@ class FileOrganizerApp(QMainWindow):
             
             # 清空结果显示（已删除）
             
-            # 更新按钮状态
-            self.run_task_btn.setEnabled(False)
-            self.pause_task_btn.setEnabled(True)
-            self.resume_task_btn.setEnabled(False)
-            self.stop_task_btn.setEnabled(True)
+            # 更新按钮状态（按钮已删除，无需更新）
             
             # 创建并启动复制线程
             self.current_thread = CopyThread(
@@ -3089,18 +3235,13 @@ class FileOrganizerApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"任务执行过程中发生错误：{str(e)}")
             self.log_operation("任务执行", "未知源", "未知目标", f"失败：{str(e)}")
-            # 恢复按钮状态
-            self.run_task_btn.setEnabled(True)
-            self.pause_task_btn.setEnabled(False)
-            self.resume_task_btn.setEnabled(False)
-            self.stop_task_btn.setEnabled(False)
+            # 恢复按钮状态（按钮已删除，无需更新）
     
     def pause_selected_task(self):
         """暂停选中的任务"""
         if self.current_thread and self.current_thread.isRunning() and not self.current_thread.paused:
             self.current_thread.pause()
-            self.pause_task_btn.setEnabled(False)
-            self.resume_task_btn.setEnabled(True)
+            # 按钮状态更新（按钮已删除，无需更新）
             self.statusBar.showMessage("任务已暂停")
             # 任务暂停信息（已删除）
     
@@ -3108,8 +3249,7 @@ class FileOrganizerApp(QMainWindow):
         """恢复选中的任务"""
         if self.current_thread and self.current_thread.isRunning() and self.current_thread.paused:
             self.current_thread.resume()
-            self.pause_task_btn.setEnabled(True)
-            self.resume_task_btn.setEnabled(False)
+            # 按钮状态更新（按钮已删除，无需更新）
             self.statusBar.showMessage("任务已恢复")
             # 任务恢复信息（已删除）
     
@@ -3128,11 +3268,7 @@ class FileOrganizerApp(QMainWindow):
                 self.current_thread = None
                 self.current_task = None
                 
-                # 更新按钮状态
-                self.run_task_btn.setEnabled(True)
-                self.pause_task_btn.setEnabled(False)
-                self.resume_task_btn.setEnabled(False)
-                self.stop_task_btn.setEnabled(False)
+                # 更新按钮状态（按钮已删除，无需更新）
                 
                 # 任务停止信息（已删除）
                 self.statusBar.showMessage("任务已停止")
@@ -3169,11 +3305,7 @@ class FileOrganizerApp(QMainWindow):
             # 保存配置
             self.save_settings()
         
-        # 恢复按钮状态
-        self.run_task_btn.setEnabled(True)
-        self.pause_task_btn.setEnabled(False)
-        self.resume_task_btn.setEnabled(False)
-        self.stop_task_btn.setEnabled(False)
+        # 恢复按钮状态（按钮已删除，无需更新）
         
         # 清理当前任务
         self.current_thread = None
@@ -3194,7 +3326,7 @@ class FileOrganizerApp(QMainWindow):
             print(f"日志写入失败：{str(e)}")
     
     def on_task_double_clicked(self, index):
-        """双击任务显示详细结果和进度条（标签页形式）
+        """双击任务显示详细结果和进度条（在任务详情标签页中显示）
         
         Args:
             index: 双击的任务索引
@@ -3213,18 +3345,40 @@ class FileOrganizerApp(QMainWindow):
         if not task:
             return
         
+        # 在任务详情标签页中显示任务详情
+        self.show_task_detail_in_main_tab(task)
+    
+
+    
+    def show_task_detail_in_main_tab(self, task):
+        """在任务详情标签页中以标签页形式显示任务详情，支持多个任务同时打开
+        
+        Args:
+            task: 任务配置
+        """
+        # 切换到任务详情标签页
+        task_detail_index = -1
+        for i in range(self.tab_widget.count()):
+            if self.tab_widget.tabText(i) == "任务详情":
+                task_detail_index = i
+                break
+        
+        if task_detail_index >= 0:
+            self.tab_widget.setCurrentIndex(task_detail_index)
+        
         # 检查是否已经打开了该任务的详情标签页
-        task_tab_index = self.find_task_detail_tab(task_id)
-        if task_tab_index >= 0:
+        task_id = task.get("task_id")
+        existing_tab_index = self.find_task_detail_tab(task_id)
+        if existing_tab_index >= 0:
             # 如果已经打开，切换到该标签页
-            self.task_detail_tabs.setCurrentIndex(task_tab_index)
+            self.task_detail_tabs.setCurrentIndex(existing_tab_index)
             return
         
-        # 创建任务详情标签页
+        # 创建新的任务详情标签页
         self.create_task_detail_tab(task)
     
     def find_task_detail_tab(self, task_id):
-        """查找任务详情标签页
+        """查找任务详情标签页的索引
         
         Args:
             task_id: 任务ID
@@ -3233,24 +3387,43 @@ class FileOrganizerApp(QMainWindow):
             int: 标签页索引，如果未找到返回-1
         """
         for i in range(self.task_detail_tabs.count()):
-            widget = self.task_detail_tabs.widget(i)
-            if hasattr(widget, 'task_id') and widget.task_id == task_id:
-                return i
+            scroll_area = self.task_detail_tabs.widget(i)
+            if scroll_area and scroll_area.widget():
+                content_widget = scroll_area.widget()
+                if hasattr(content_widget, 'task_id') and content_widget.task_id == task_id:
+                    return i
         return -1
     
     def create_task_detail_tab(self, task):
-        """创建任务详情标签页
+        """创建任务详情标签页，支持滚动条
         
         Args:
             task: 任务配置
         """
-        # 创建标签页内容
-        tab_widget = QWidget()
-        tab_widget.task_id = task.get("task_id")  # 存储任务ID用于标识
+        # 创建滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet("QScrollArea { background-color: #e9ecef; border: none; }")
         
-        main_layout = QVBoxLayout(tab_widget)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        # 创建内容容器
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background-color: #e9ecef;")
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(12)
+        content_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # 任务标题
+        title_label = QLabel(f"任务详情 - {task.get('description', '未命名任务')}")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; margin: 10px;")
+        content_layout.addWidget(title_label)
+        
+        # 分隔线
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        content_layout.addWidget(line)
         
         # 任务信息区域
         info_group = QGroupBox("任务信息")
@@ -3278,42 +3451,41 @@ class FileOrganizerApp(QMainWindow):
             status_label.setStyleSheet("color: #dc3545;")
         info_layout.addWidget(status_label, 4, 1)
         
-        main_layout.addWidget(info_group)
+        content_layout.addWidget(info_group)
         
         # 详细进度区域
         progress_group = QGroupBox("详细进度")
         progress_layout = QVBoxLayout(progress_group)
         
-        # 文件移动图标和信息
-        file_info_widget = QWidget()
-        file_info_layout = QHBoxLayout(file_info_widget)
+        # 当前文件信息
+        current_file_layout = QHBoxLayout()
+        current_file_layout.addWidget(QLabel("当前文件:"))
+        current_file_label = QLabel("等待开始...")
+        current_file_layout.addWidget(current_file_label)
+        current_file_layout.addStretch()
         
-        # 文件图标（动态变化）
+        # 文件图标
         file_icon_label = QLabel()
-        # 创建初始文件图标（准备状态）
+        file_icon_label.setFixedSize(55, 55)
         self.update_file_icon(file_icon_label, "ready")
-        file_info_layout.addWidget(file_icon_label)
+        current_file_layout.addWidget(file_icon_label)
+        progress_layout.addLayout(current_file_layout)
         
-        # 当前操作文件信息
-        current_file_label = QLabel("准备就绪")
-        current_file_label.setStyleSheet("font-size: 12px; color: #6c757d;")
-        file_info_layout.addWidget(current_file_label)
-        file_info_layout.addStretch()
-        
-        # 复制速度显示
-        speed_label = QLabel("速度: 0 B/s")
-        speed_label.setStyleSheet("font-size: 12px; color: #6c757d;")
-        file_info_layout.addWidget(speed_label)
-        
-        progress_layout.addWidget(file_info_widget)
+        # 速度显示
+        speed_layout = QHBoxLayout()
+        speed_layout.addWidget(QLabel("速度:"))
+        speed_label = QLabel("等待开始...")
+        speed_layout.addWidget(speed_label)
+        speed_layout.addStretch()
+        progress_layout.addLayout(speed_layout)
         
         # 进度条
         detail_progress_bar = QProgressBar()
+        detail_progress_bar.setRange(0, 100)
         detail_progress_bar.setValue(0)
-        detail_progress_bar.setFormat("%p%")  # 只显示百分比
         progress_layout.addWidget(detail_progress_bar)
         
-        main_layout.addWidget(progress_group)
+        content_layout.addWidget(progress_group)
         
         # 操作结果区域
         result_group = QGroupBox("操作结果")
@@ -3324,7 +3496,7 @@ class FileOrganizerApp(QMainWindow):
         detail_result_text.setMinimumHeight(150)
         result_layout.addWidget(detail_result_text)
         
-        main_layout.addWidget(result_group)
+        content_layout.addWidget(result_group)
         
         # 按钮区域
         button_layout = QHBoxLayout()
@@ -3332,27 +3504,48 @@ class FileOrganizerApp(QMainWindow):
         
         # 执行任务按钮
         execute_btn = QPushButton("执行任务")
-        execute_btn.clicked.connect(lambda: self.execute_task_with_detail(task, tab_widget, detail_progress_bar, detail_result_text, current_file_label, speed_label, file_icon_label))
+        execute_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5c7cfa;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #748ffc;
+            }
+            QPushButton:pressed {
+                background-color: #4c6ef5;
+            }
+        """)
+        execute_btn.clicked.connect(lambda: self.execute_task_with_detail(task, content_widget, detail_progress_bar, detail_result_text, current_file_label, speed_label, file_icon_label))
         button_layout.addWidget(execute_btn)
         
         button_layout.addStretch()
-        main_layout.addLayout(button_layout)
+        content_layout.addLayout(button_layout)
+        
+        # 设置滚动区域的内容
+        scroll_area.setWidget(content_widget)
+        
+        # 存储UI组件引用到标签页
+        content_widget.task_id = task.get("task_id")
+        content_widget.detail_progress_bar = detail_progress_bar
+        content_widget.detail_result_text = detail_result_text
+        content_widget.current_file_label = current_file_label
+        content_widget.speed_label = speed_label
+        content_widget.file_icon_label = file_icon_label
         
         # 添加标签页
-        tab_title = f"任务详情 - {task.get('description', '未命名任务')}"
-        tab_index = self.task_detail_tabs.addTab(tab_widget, tab_title)
+        tab_index = self.task_detail_tabs.addTab(scroll_area, task.get("description", "未命名任务"))
         self.task_detail_tabs.setCurrentIndex(tab_index)
         
-        # 存储UI组件引用
-        tab_widget.detail_progress_bar = detail_progress_bar
-        tab_widget.detail_result_text = detail_result_text
-        tab_widget.current_file_label = current_file_label
-        tab_widget.speed_label = speed_label
-        tab_widget.file_icon_label = file_icon_label
-        tab_widget.execute_btn = execute_btn
-        
-        # 存储标签页引用
-        self.task_detail_tabs_dict[task_id] = tab_widget
+        # 占位符已删除，无需隐藏
+        self.task_detail_container.execute_btn = execute_btn
+        self.task_detail_container.task_id = task.get("task_id")
+    
+
     
     def close_task_detail_tab(self, index):
         """关闭任务详情标签页
@@ -3360,13 +3553,39 @@ class FileOrganizerApp(QMainWindow):
         Args:
             index: 标签页索引
         """
-        # 获取标签页组件
-        tab_widget = self.task_detail_tabs.widget(index)
+        # 获取标签页组件（现在是QScrollArea）
+        scroll_area = self.task_detail_tabs.widget(index)
         
-        # 检查是否有正在运行的线程
-        if hasattr(tab_widget, 'detail_thread') and tab_widget.detail_thread:
-            thread = tab_widget.detail_thread
-            if thread.isRunning():
+        # 获取内容组件（包含任务详情）
+        if scroll_area and scroll_area.widget():
+            content_widget = scroll_area.widget()
+            
+            # 检查是否有正在运行的线程，如果有则直接停止
+            if hasattr(content_widget, 'detail_thread') and content_widget.detail_thread:
+                thread = content_widget.detail_thread
+                if thread.isRunning():
+                    # 直接停止线程，不显示确认对话框
+                    thread.terminate()
+                    thread.wait()
+        
+        # 移除标签页
+        self.task_detail_tabs.removeTab(index)
+        
+        # 占位符已删除，无需显示
+    
+    def close_main_tab(self, index):
+        """关闭主标签页
+        
+        Args:
+            index: 标签页索引
+        """
+        # 获取标签页文本
+        tab_text = self.tab_widget.tabText(index)
+        
+        # 如果是任务详情标签页，检查是否有正在运行的任务
+        if tab_text == "任务详情" and hasattr(self.task_detail_container, 'detail_thread'):
+            thread = self.task_detail_container.detail_thread
+            if thread and thread.isRunning():
                 # 询问用户是否停止任务
                 reply = QMessageBox.question(self, "确认关闭", 
                                            "任务仍在运行，确定要关闭标签页吗？\n\n关闭标签页将停止当前任务。",
@@ -3378,14 +3597,12 @@ class FileOrganizerApp(QMainWindow):
                 else:
                     return  # 用户取消关闭
         
-        # 从字典中移除引用
-        if hasattr(tab_widget, 'task_id'):
-            task_id = tab_widget.task_id
-            if task_id in self.task_detail_tabs_dict:
-                del self.task_detail_tabs_dict[task_id]
-        
         # 移除标签页
-        self.task_detail_tabs.removeTab(index)
+        self.tab_widget.removeTab(index)
+        
+        # 如果是任务详情标签页，重新创建空的容器
+        if tab_text == "任务详情":
+            self.create_task_detail_main_tab()
     
     def execute_task_with_detail(self, task, dialog, progress_bar, result_text, current_file_label, speed_label, file_icon_label):
         """在任务详情对话框中执行任务并更新进度显示
@@ -3608,11 +3825,13 @@ class FileOrganizerApp(QMainWindow):
             speed_label: 速度标签
             file_icon_label: 文件图标标签（可选）
         """
-        # 添加消息到结果文本
-        result_text.append(message)
-        
         # 解析消息，更新文件信息和速度
         import re
+        
+        # 过滤掉进度和速度相关的消息，只显示重要的操作结果
+        if not ("进度：" in message or "速度：" in message or "总文件大小：" in message):
+            # 添加重要消息到结果文本
+            result_text.append(message)
         
         # 简化的图标更新逻辑 - 确保图标能够正确更新
         if file_icon_label:
@@ -3647,25 +3866,31 @@ class FileOrganizerApp(QMainWindow):
             elif "✗ 复制失败" in message and ("复制完成" in message or "任务完成" in message):
                 self.update_file_icon(file_icon_label, "error")
         
-        # 更新进度条（模拟进度）
+        # 更新进度条（基于实际文件操作）
         if "进度" in message:
-            progress_match = re.search(r"进度：(\d+)%", message)
+            progress_match = re.search(r"进度：(\d+(?:\.\d+)?)%", message)
             if progress_match:
-                progress_bar.setValue(int(progress_match.group(1)))
+                progress_value = float(progress_match.group(1))
+                progress_bar.setValue(int(progress_value))
         
-        # 更新速度显示（降低更新频率，只在特定消息时更新）
-        if "复制成功" in message or "复制失败" in message:
-            # 只在每5个文件复制完成后更新一次速度，避免更新太快
-            import random
-            if random.randint(1, 5) == 1:  # 20%的概率更新速度
-                speed = random.randint(100, 5000)  # 模拟速度 100B/s - 5KB/s
-                if speed > 1024:
-                    speed_label.setText(f"速度: {speed/1024:.1f} KB/s")
-                else:
-                    speed_label.setText(f"速度: {speed} B/s")
-            
-            # 移除图标更新逻辑，只在任务完成时更新图标状态
-            # 图标状态更新已在上面的逻辑中处理
+        # 更新速度显示
+        if "速度：" in message:
+            speed_match = re.search(r"速度：(.+?)/s", message)
+            if speed_match:
+                speed_label.setText(f"速度: {speed_match.group(1)}/s")
+        
+        # 更新当前文件信息
+        if "正在复制：" in message:
+            # 提取文件名和大小信息
+            file_match = re.search(r"正在复制：([^()]+)\((.*?)\)", message)
+            if file_match:
+                file_path = file_match.group(1).strip()
+                file_size = file_match.group(2)
+                current_file_label.setText(f"{os.path.basename(file_path)} ({file_size})")
+                
+                # 更新文件图标为复制中状态
+                if file_icon_label:
+                    self.update_file_icon(file_icon_label, "copying", file_path)
         
         # 自动滚动到底部
         cursor = result_text.textCursor()
@@ -3709,7 +3934,7 @@ class FileOrganizerApp(QMainWindow):
         self.save_settings()
     
     def refresh_logs(self):
-        """刷新日志显示"""
+        """刷新日志显示 - 只显示最新内容并提供向后查看功能"""
         if not os.path.exists(self.log_file_path):
             self.log_text_edit.setText("日志文件不存在")
             return
@@ -3722,9 +3947,16 @@ class FileOrganizerApp(QMainWindow):
             for encoding in encodings:
                 try:
                     with open(self.log_file_path, "r", encoding=encoding) as f:
-                        content = f.read()
+                        lines = f.readlines()
                     # 如果成功读取且内容不为空，则使用该编码
-                    if content.strip():
+                    if lines:
+                        # 只显示最新的100行内容
+                        if len(lines) > 100:
+                            content = "".join(lines[-100:])
+                            # 添加提示信息
+                            content = f"[显示最新100行，共{len(lines)}行，点击'向后查看'按钮查看更多历史记录]\n\n{content}"
+                        else:
+                            content = "".join(lines)
                         break
                 except UnicodeDecodeError:
                     continue
@@ -3741,7 +3973,16 @@ class FileOrganizerApp(QMainWindow):
                     import chardet
                     detected = chardet.detect(raw_content)
                     encoding = detected.get('encoding', 'utf-8')
-                    content = raw_content.decode(encoding, errors='replace')
+                    raw_text = raw_content.decode(encoding, errors='replace')
+                    lines = raw_text.split('\n')
+                    if lines:
+                        # 只显示最新的100行内容
+                        if len(lines) > 100:
+                            content = "\n".join(lines[-100:])
+                            # 添加提示信息
+                            content = f"[显示最新100行，共{len(lines)}行，点击'向后查看'按钮查看更多历史记录]\n\n{content}"
+                        else:
+                            content = raw_text
                 except Exception as e:
                     QMessageBox.critical(self, "错误", f"无法读取日志文件：{str(e)}")
                     return
@@ -3751,6 +3992,53 @@ class FileOrganizerApp(QMainWindow):
             # 滚动到最后一行
             cursor = self.log_text_edit.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
+            self.log_text_edit.setTextCursor(cursor)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"读取日志文件失败：{str(e)}")
+    
+    def view_older_logs(self):
+        """查看更早的日志记录"""
+        if not os.path.exists(self.log_file_path):
+            QMessageBox.information(self, "提示", "日志文件不存在")
+            return
+        
+        try:
+            # 读取完整的日志文件
+            encodings = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'latin-1']
+            content = ""
+            
+            for encoding in encodings:
+                try:
+                    with open(self.log_file_path, "r", encoding=encoding) as f:
+                        content = f.read()
+                    if content.strip():
+                        break
+                except UnicodeDecodeError:
+                    continue
+                except Exception as e:
+                    print(f"使用编码 {encoding} 读取日志文件失败：{str(e)}")
+                    continue
+            
+            # 如果所有编码都失败，尝试二进制读取并解码
+            if not content.strip():
+                try:
+                    with open(self.log_file_path, "rb") as f:
+                        raw_content = f.read()
+                    import chardet
+                    detected = chardet.detect(raw_content)
+                    encoding = detected.get('encoding', 'utf-8')
+                    content = raw_content.decode(encoding, errors='replace')
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"无法读取日志文件：{str(e)}")
+                    return
+            
+            # 显示完整的日志内容
+            self.log_text_edit.setText(content)
+            
+            # 滚动到顶部
+            cursor = self.log_text_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
             self.log_text_edit.setTextCursor(cursor)
             
         except Exception as e:
@@ -4062,17 +4350,22 @@ class FileOrganizerApp(QMainWindow):
         features_label = QLabel(
             "功能特性：\n" 
             "• 智能文件整理与任务管理\n" 
-            "• 支持多种文件复制方式\n" 
             "• 完整的操作日志系统\n" 
-            "• 系统托盘自动隐藏功能\n" 
+            "• 系统托盘自动隐藏功能\n"
             "• 开机自启动支持\n"
             "• 定时任务调度管理\n"
             "• 多线程文件处理\n"
-            "• 实时进度监控\n"
+            "• 实时进度监控（基于文件大小）\n"
             "• 自定义文件过滤规则\n"
             "• 批量操作支持\n"
             "• 错误处理与重试机制\n"
-            "• 用户配置持久化"
+            "• 用户配置持久化\n"
+            "\n"
+            "支持的复制方式：\n"
+            "• 完整文件夹结构复制 - 保留源文件夹完整结构\n"
+            "• 文件内容合并复制 - 合并所有文件到同一目录\n"
+            "• 增量差异复制 - 只复制新增或修改的文件\n"
+            "• 覆盖式复制 - 覆盖目标文件夹中的同名文件"
         )
         features_label.setWordWrap(True)
         features_label.setStyleSheet("color: #343a40; font-size: 16px; background-color: #f8f9fa; padding: 15px; border-radius: 8px;")

@@ -14,7 +14,7 @@
       "task_id": "54523889-27ea-4591-bb7c-1afc31c80096",
       "source_folder": "C:/Users/Administrator/Desktop/wwq_infor/music",
       "dest_folder": "C:/Users/Administrator/Desktop/wwq_infor/test",
-      "copy_mode": "增量差异复制",
+      "copy_mode": "覆盖式复制",
       "file_filters": [],
       "suffix_filters": [],
       "description": "1",
@@ -22,8 +22,8 @@
     }
   ],
   "log_file_path": "D:\\Python\\just_for_moving_documents\\file_organizer.log",
-  "minimize_to_tray": false,
+  "minimize_to_tray": true,
   "startup": true,
   "startup_type": "user",
-  "__last_save__": "2026-01-30T21:00:56.761097"
+  "__last_save__": "2026-01-30T23:43:21.354562"
 }
