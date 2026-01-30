@@ -1,0 +1,17 @@
+[
+  {
+    "task_id": "114e4160-7d2f-4f45-b872-bffd88a00ca8",
+    "name": "1",
+    "description": "1",
+    "enabled": true,
+    "trigger_type": "once",
+    "trigger_time": "2026-01-30T19:29:03.565000",
+    "repeat_interval": 1,
+    "weekdays": [],
+    "month_day": 1,
+    "linked_task_id": "",
+    "last_executed": null,
+    "next_execution": "2026-01-30T19:29:03.565000",
+    "status": "pending"
+  }
+]

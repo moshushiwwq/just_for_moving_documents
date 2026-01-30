@@ -1,0 +1,19 @@
+{
+  "tasks": [
+    {
+      "task_id": "87cefe3a-ff35-4437-90c4-95951caea219",
+      "source_folder": "C:/Users/Administrator/Desktop/wwq_infor/桌面猫咪全键位",
+      "dest_folder": "C:/Users/Administrator/Desktop/wwq_infor/test",
+      "copy_mode": "覆盖式复制",
+      "file_filters": [],
+      "suffix_filters": [],
+      "description": "·1",
+      "status": "已完成"
+    }
+  ],
+  "log_file_path": "D:\\Python\\just_for_moving_documents\\file_organizer.log",
+  "minimize_to_tray": false,
+  "startup": true,
+  "startup_type": "user",
+  "__last_save__": "2026-01-30T19:34:52.787565"
+}
