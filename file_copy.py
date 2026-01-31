@@ -33,6 +33,9 @@ from PyQt6.QtCore import (Qt, QTimer, QPoint, QRect, QThread, QObject, pyqtSigna
                             QSettings, QRectF, QPointF, QDate, QTime, QDateTime,
                             QMutex, QWaitCondition)
 
+# 导入图标管理器
+from icon_manager import icon_manager
+
 
 # ===== 跨平台自启动管理器 =====
 class StartupManager:
@@ -169,9 +172,14 @@ class StartupManager:
             hive = winreg.HKEY_LOCAL_MACHINE
         
         try:
+            # 添加命令行参数，使自启动时最小化到系统托盘
+            startup_command = f'"{self.app_path}" --startup'
+            
             key = winreg.OpenKey(hive, reg_path, 0, winreg.KEY_WRITE)
-            winreg.SetValueEx(key, self.app_name, 0, winreg.REG_SZ, self.app_path)
+            winreg.SetValueEx(key, self.app_name, 0, winreg.REG_SZ, startup_command)
             winreg.CloseKey(key)
+            
+            self.logger.info(f"Windows自启动设置成功 - 命令: {startup_command}")
             return True
         except PermissionError:
             self.logger.error("需要管理员权限来设置系统级自启动")
@@ -1164,6 +1172,9 @@ class ScheduledTaskConfigDialog(QDialog):
         # 计算下次执行时间
         next_execution = self.calculate_next_execution(trigger_type, trigger_time, weekdays)
         
+        # 获取选中的文件复制任务ID
+        selected_task_id = self.task_combo.currentData()
+        
         # 更新配置
         self.task_config.update({
             "name": self.name_edit.text().strip(),
@@ -1174,7 +1185,8 @@ class ScheduledTaskConfigDialog(QDialog):
             "repeat_interval": self.repeat_spin.value(),
             "weekdays": weekdays,
             "month_day": self.monthday_spin.value(),
-            "next_execution": next_execution
+            "next_execution": next_execution,
+            "linked_task_id": selected_task_id if selected_task_id else ""
         })
         
         return self.task_config
@@ -1667,8 +1679,8 @@ class FileOrganizerApp(QMainWindow):
         self.setWindowTitle("文件整理工具")
         self.setMinimumSize(900, 600)
         
-        # 设置应用程序图标
-        self.setWindowIcon(self.create_tray_icon("normal"))
+        # 设置应用程序图标（使用统一的图标管理器）
+        self.setWindowIcon(icon_manager.get_application_icon(64))
         
         # 初始化QSettings，使用明确的文件路径来保存设置
         import os
@@ -2236,10 +2248,15 @@ class FileOrganizerApp(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(8, 8, 8, 8)
         
+
+        
         # 创建任务详情标签页控件
         self.task_detail_tabs = QTabWidget()
         self.task_detail_tabs.setTabsClosable(True)
         self.task_detail_tabs.tabCloseRequested.connect(self.close_task_detail_tab)
+        
+
+        
         layout.addWidget(self.task_detail_tabs)
         
 
@@ -2678,7 +2695,8 @@ class FileOrganizerApp(QMainWindow):
         """初始化系统托盘图标 - 跨平台兼容版本"""
         self.tray_icon = QSystemTrayIcon(self)
         
-        self.tray_icon.setIcon(self.create_tray_icon())
+        # 使用统一的图标管理器设置托盘图标
+        self.tray_icon.setIcon(icon_manager.get_tray_icon("normal"))
         
         self.tray_icon.setToolTip("文件整理工具 - 准备就绪")
         
@@ -2781,11 +2799,13 @@ class FileOrganizerApp(QMainWindow):
         if self.animation_frame >= 8:
             self.animation_frame = 0
         
-        self.tray_icon.setIcon(self.create_tray_icon("running"))
+        # 使用统一的图标管理器设置运行状态图标
+        self.tray_icon.setIcon(icon_manager.get_tray_icon("running"))
         
         if self.animation_frame == 7:
             self.animation_timer.stop()
-            self.tray_icon.setIcon(self.create_tray_icon("normal"))
+            # 使用统一的图标管理器设置正常状态图标
+            self.tray_icon.setIcon(icon_manager.get_tray_icon("normal"))
             self.update_tray_tooltip()
     
     def start_tray_animation(self):
@@ -2873,8 +2893,14 @@ class FileOrganizerApp(QMainWindow):
     def on_hide_window(self, event):
         """窗口隐藏事件处理"""
         if self.isMinimized():
+            # 最小化时隐藏窗口，只显示系统托盘图标
             self.hide()
+            # 显示托盘通知
+            self.show_tray_notification("文件整理工具已最小化", "程序已在后台运行，点击托盘图标可恢复窗口")
             event.ignore()
+        else:
+            # 正常隐藏，不处理
+            event.accept()
     
     def on_tray_icon_activated(self, reason):
         """托盘图标激活事件处理
@@ -2887,9 +2913,13 @@ class FileOrganizerApp(QMainWindow):
         trigger_reason = getattr(QSystemTrayIcon.ActivationReason, 'Trigger', None)
         if trigger_reason is not None and reason == trigger_reason:
             if self.isVisible():
+                # 如果窗口可见，则最小化到系统托盘
+                self.showMinimized()
                 self.hide()
             else:
+                # 如果窗口隐藏，则显示并激活窗口
                 self.show()
+                self.showNormal()
                 self.raise_()
                 self.activateWindow()
     
@@ -3405,18 +3435,15 @@ class FileOrganizerApp(QMainWindow):
         scroll_area.setWidgetResizable(True)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setStyleSheet("QScrollArea { background-color: #e9ecef; border: none; }")
-        
         # 创建内容容器
         content_widget = QWidget()
-        content_widget.setStyleSheet("background-color: #e9ecef;")
         content_layout = QVBoxLayout(content_widget)
         content_layout.setSpacing(12)
         content_layout.setContentsMargins(8, 8, 8, 8)
         
         # 任务标题
         title_label = QLabel(f"任务详情 - {task.get('description', '未命名任务')}")
-        title_label.setStyleSheet("font-size: 18px; font-weight: bold; margin: 10px;")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; margin: 10px; color: #343a40;")
         content_layout.addWidget(title_label)
         
         # 分隔线
@@ -3431,25 +3458,30 @@ class FileOrganizerApp(QMainWindow):
         info_layout.setSpacing(10)
         
         # 添加任务信息
-        info_layout.addWidget(QLabel("任务描述:"), 0, 0)
-        info_layout.addWidget(QLabel(task.get("description", "未命名任务")), 0, 1)
+        info_layout.addWidget(QLabel("任务ID:"), 0, 0)
+        task_id_label = QLabel(task.get("task_id", "未设置"))
+        task_id_label.setStyleSheet("font-family: 'Courier New', monospace; color: #6c757d;")
+        info_layout.addWidget(task_id_label, 0, 1)
         
-        info_layout.addWidget(QLabel("源文件夹:"), 1, 0)
-        info_layout.addWidget(QLabel(task.get("source_folder", "未设置")), 1, 1)
+        info_layout.addWidget(QLabel("任务描述:"), 1, 0)
+        info_layout.addWidget(QLabel(task.get("description", "未命名任务")), 1, 1)
         
-        info_layout.addWidget(QLabel("目标文件夹:"), 2, 0)
-        info_layout.addWidget(QLabel(task.get("dest_folder", "未设置")), 2, 1)
+        info_layout.addWidget(QLabel("源文件夹:"), 2, 0)
+        info_layout.addWidget(QLabel(task.get("source_folder", "未设置")), 2, 1)
         
-        info_layout.addWidget(QLabel("复制方式:"), 3, 0)
-        info_layout.addWidget(QLabel(task.get("copy_mode", "完整文件夹结构复制")), 3, 1)
+        info_layout.addWidget(QLabel("目标文件夹:"), 3, 0)
+        info_layout.addWidget(QLabel(task.get("dest_folder", "未设置")), 3, 1)
         
-        info_layout.addWidget(QLabel("任务状态:"), 4, 0)
+        info_layout.addWidget(QLabel("复制方式:"), 4, 0)
+        info_layout.addWidget(QLabel(task.get("copy_mode", "完整文件夹结构复制")), 4, 1)
+        
+        info_layout.addWidget(QLabel("任务状态:"), 5, 0)
         status_label = QLabel(task.get("status", "未完成"))
         if task.get("status") == "已完成":
             status_label.setStyleSheet("color: #28a745;")
         else:
             status_label.setStyleSheet("color: #dc3545;")
-        info_layout.addWidget(status_label, 4, 1)
+        info_layout.addWidget(status_label, 5, 1)
         
         content_layout.addWidget(info_group)
         
@@ -3504,26 +3536,22 @@ class FileOrganizerApp(QMainWindow):
         
         # 执行任务按钮
         execute_btn = QPushButton("执行任务")
-        execute_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #5c7cfa;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #748ffc;
-            }
-            QPushButton:pressed {
-                background-color: #4c6ef5;
-            }
-        """)
         execute_btn.clicked.connect(lambda: self.execute_task_with_detail(task, content_widget, detail_progress_bar, detail_result_text, current_file_label, speed_label, file_icon_label))
         button_layout.addWidget(execute_btn)
         
+        # 暂停任务按钮
+        pause_btn = QPushButton("暂停任务")
+        pause_btn.setEnabled(False)  # 初始状态为禁用
+        pause_btn.clicked.connect(lambda: self.pause_task_detail(content_widget, pause_btn))
+        button_layout.addWidget(pause_btn)
+        
         button_layout.addStretch()
+        
+        # 关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(lambda: self.close_current_task_detail_tab(content_widget))
+        button_layout.addWidget(close_btn)
+        
         content_layout.addLayout(button_layout)
         
         # 设置滚动区域的内容
@@ -3536,6 +3564,8 @@ class FileOrganizerApp(QMainWindow):
         content_widget.current_file_label = current_file_label
         content_widget.speed_label = speed_label
         content_widget.file_icon_label = file_icon_label
+        content_widget.pause_btn = pause_btn
+        content_widget.execute_btn = execute_btn
         
         # 添加标签页
         tab_index = self.task_detail_tabs.addTab(scroll_area, task.get("description", "未命名任务"))
@@ -3546,6 +3576,40 @@ class FileOrganizerApp(QMainWindow):
         self.task_detail_container.task_id = task.get("task_id")
     
 
+    
+    def pause_task_detail(self, content_widget, pause_btn):
+        """暂停任务详情中的任务执行
+        
+        Args:
+            content_widget: 任务详情内容组件
+            pause_btn: 暂停按钮
+        """
+        if hasattr(content_widget, 'detail_thread') and content_widget.detail_thread:
+            thread = content_widget.detail_thread
+            if thread.isRunning():
+                if thread.paused:
+                    # 恢复任务
+                    thread.resume()
+                    pause_btn.setText("暂停任务")
+                    self.statusBar.showMessage("任务已恢复")
+                else:
+                    # 暂停任务
+                    thread.pause()
+                    pause_btn.setText("恢复任务")
+                    self.statusBar.showMessage("任务已暂停")
+    
+    def close_current_task_detail_tab(self, content_widget):
+        """关闭当前任务详情标签页
+        
+        Args:
+            content_widget: 任务详情内容组件
+        """
+        # 查找包含该内容组件的标签页索引
+        for i in range(self.task_detail_tabs.count()):
+            scroll_area = self.task_detail_tabs.widget(i)
+            if scroll_area and scroll_area.widget() == content_widget:
+                self.close_task_detail_tab(i)
+                break
     
     def close_task_detail_tab(self, index):
         """关闭任务详情标签页
@@ -3665,6 +3729,15 @@ class FileOrganizerApp(QMainWindow):
             progress_bar.setValue(0)
             current_file_label.setText("准备就绪")
             speed_label.setText("速度: 0 B/s")
+            
+            # 启用暂停按钮
+            if hasattr(dialog, 'pause_btn'):
+                dialog.pause_btn.setEnabled(True)
+                dialog.pause_btn.setText("暂停任务")
+            
+            # 禁用执行按钮
+            if hasattr(dialog, 'execute_btn'):
+                dialog.execute_btn.setEnabled(False)
             
             # 显示开始信息
             result_text.append(f"开始执行任务：{task.get('description', '未命名任务')}")
@@ -3919,6 +3992,21 @@ class FileOrganizerApp(QMainWindow):
             if t.get("task_id") == task.get("task_id"):
                 self.tasks[i]["status"] = "已完成"
                 break
+        
+        # 重置按钮状态
+        # 查找对应的任务详情标签页
+        for i in range(self.task_detail_tabs.count()):
+            scroll_area = self.task_detail_tabs.widget(i)
+            if scroll_area and scroll_area.widget():
+                content_widget = scroll_area.widget()
+                if hasattr(content_widget, 'task_id') and content_widget.task_id == task.get("task_id"):
+                    # 禁用暂停按钮
+                    if hasattr(content_widget, 'pause_btn'):
+                        content_widget.pause_btn.setEnabled(False)
+                    # 启用执行按钮
+                    if hasattr(content_widget, 'execute_btn'):
+                        content_widget.execute_btn.setEnabled(True)
+                    break
         
         # 记录日志
         self.log_operation(
@@ -4240,15 +4328,15 @@ class FileOrganizerApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("关于文件整理工具")
         
-        # 设置窗口尺寸与主窗口高度保持一致，宽度保持400像素
-        main_window_height = self.height()
-        dialog.setFixedSize(400, main_window_height)
+        # 设置窗口尺寸与主窗口完全重叠
+        main_window_size = self.size()
+        dialog.setFixedSize(main_window_size)
         dialog.setStyleSheet(TaskConfigDialog.DIALOG_STYLE_SHEET)
         
-        # 设置窗口图标，与系统托盘图标保持一致
-        dialog.setWindowIcon(self.create_tray_icon("normal"))
+        # 设置窗口图标，使用统一的图标管理器
+        dialog.setWindowIcon(icon_manager.get_dialog_icon(32))
         
-        # 调整窗口位置，使其左上角与主窗口左上角对齐
+        # 调整窗口位置，使其与主窗口完全重叠
         main_window_pos = self.pos()
         dialog.move(main_window_pos)
         
@@ -4279,11 +4367,11 @@ class FileOrganizerApp(QMainWindow):
         # 添加弹性空间以更好地利用增加的窗口高度
         main_layout.addStretch(1)
         
-        # 添加应用程序图标 - 使用与系统托盘一致的图标
+        # 添加应用程序图标 - 使用统一的图标管理器
         icon_label = QLabel()
-        tray_icon = self.create_tray_icon("normal")
-        # 增加图标尺寸以适应更高的窗口
-        pixmap = tray_icon.pixmap(96, 96)
+        # 使用应用程序图标，尺寸为96x96像素
+        app_icon = icon_manager.get_application_icon(96)
+        pixmap = app_icon.pixmap(96, 96)
         icon_label.setPixmap(pixmap)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(icon_label)
@@ -4292,7 +4380,7 @@ class FileOrganizerApp(QMainWindow):
         main_layout.addStretch(1)
         
         # 添加应用程序名称和版本
-        name_label = QLabel("文件整理工具 v1.0")
+        name_label = QLabel("文件整理工具 v2.0")
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name_label.setStyleSheet("font-size: 22px; font-weight: bold; color: #5c7cfa; margin-bottom: 10px;")
         main_layout.addWidget(name_label)
@@ -4309,9 +4397,9 @@ class FileOrganizerApp(QMainWindow):
         # 添加功能列表 - 带滚动条
         features_scroll_area = QScrollArea()
         # 根据窗口高度动态设置滚动区域高度
-        scroll_area_height = max(150, min(300, int(main_window_height * 0.3)))
+        scroll_area_height = max(150, min(300, int(main_window_size.height() * 0.4)))
         features_scroll_area.setMinimumHeight(scroll_area_height)
-        features_scroll_area.setMaximumHeight(int(main_window_height * 0.4))
+        features_scroll_area.setMaximumHeight(int(main_window_size.height() * 0.5))
         features_scroll_area.setWidgetResizable(True)
         features_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         features_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -4378,9 +4466,9 @@ class FileOrganizerApp(QMainWindow):
         # 添加更新说明 - 带滚动条
         updates_scroll_area = QScrollArea()
         # 根据窗口高度动态设置滚动区域高度
-        updates_scroll_height = max(120, min(250, int(main_window_height * 0.25)))
+        updates_scroll_height = max(120, min(250, int(main_window_size.height() * 0.35)))
         updates_scroll_area.setMinimumHeight(updates_scroll_height)
-        updates_scroll_area.setMaximumHeight(int(main_window_height * 0.35))
+        updates_scroll_area.setMaximumHeight(int(main_window_size.height() * 0.45))
         updates_scroll_area.setWidgetResizable(True)
         updates_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         updates_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -4643,8 +4731,22 @@ class FileOrganizerApp(QMainWindow):
 if __name__ == "__main__":
     """主程序入口"""
     app = QApplication(sys.argv)
-    # 设置应用程序全局图标
+    
+    # 检查命令行参数，判断是否通过自启动方式启动
+    is_startup_launch = "--startup" in sys.argv
+    
+    # 设置应用程序全局图标（使用统一的图标管理器）
     window = FileOrganizerApp()
-    app.setWindowIcon(window.create_tray_icon("normal"))
-    window.show()
+    app.setWindowIcon(icon_manager.get_application_icon(64))
+    
+    # 如果是自启动方式启动，则不显示主窗口，直接最小化到系统托盘
+    if is_startup_launch:
+        # 隐藏主窗口，只显示系统托盘图标
+        window.hide()
+        # 显示系统托盘通知
+        window.show_tray_notification("文件整理工具已启动", "程序已在后台运行，点击托盘图标可显示主窗口")
+    else:
+        # 正常启动，显示主窗口
+        window.show()
+    
     sys.exit(app.exec())

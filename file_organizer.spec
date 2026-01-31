@@ -1,15 +1,35 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
 block_cipher = None
 
+# 添加必要的隐藏导入
+hidden_imports = [
+    'PyQt6.QtWidgets',
+    'PyQt6.QtGui', 
+    'PyQt6.QtCore',
+    'winreg',
+    'logging',
+    'shutil',
+    'uuid',
+    'platform',
+    'subprocess',
+    'datetime',
+    'time',
+    'threading',
+    'os',
+    'sys'
+]
 
 a = Analysis(
-    ['1.py'],
+    ['file_copy.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    # 包含数据文件
+    datas=[
+        ('scheduled_tasks.json', '.'),
+        ('settings.json', '.')
+    ],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -18,21 +38,19 @@ a = Analysis(
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
+    optimize=0,
 )
 
-# 添加PyQt6相关的隐藏导入
-pyqt6_modules = [
-    'PyQt6.QtCore',
-    'PyQt6.QtGui', 
-    'PyQt6.QtWidgets',
-    'PyQt6.QtPrintSupport',
+# 添加PyQt6插件
+pyqt6_plugins = [
+    'PyQt6.Qt6Plugins',
+    'PyQt6.Qt6Core',
+    'PyQt6.Qt6Gui',
+    'PyQt6.Qt6Widgets'
 ]
 
-for module in pyqt6_modules:
-    a.add_hidden_imports([module])
-
-# 添加其他可能需要的模块
-a.add_hidden_imports(['uuid', 'shutil', 'logging', 'threading', 'datetime', 'time'])
+for plugin in pyqt6_plugins:
+    a.binaries.append((plugin, plugin, 'BINARY'))
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -40,7 +58,6 @@ exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
-    a.zipfiles,
     a.datas,
     [],
     name='文件整理工具',
@@ -56,5 +73,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='app_icon_256.png',  # 使用PNG图标文件（PyInstaller会自动转换为ICO）
+    icon=None,
 )
